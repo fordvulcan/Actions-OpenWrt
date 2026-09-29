@@ -1,0 +1,16 @@
+#!/bin/sh
+# Cudy TR3000 首次启动默认项（uci-defaults，执行成功后自动删除）
+# 可按需修改，例如默认主机名、时区、WiFi 关闭等
+
+uci set system.@system[0].hostname='TR3000'
+uci set system.@system[0].timezone='CST-8'
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci commit system
+
+# 若内置了 Argon 主题，将其设为 LuCI 默认主题
+if [ -d /www/luci-static/argon ]; then
+    uci set luci.main.mediaurlbase='/luci-static/argon'
+    uci commit luci
+fi
+
+exit 0

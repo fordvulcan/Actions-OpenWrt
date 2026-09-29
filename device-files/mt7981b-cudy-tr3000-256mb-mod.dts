@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Cudy TR3000 (256M) 大分区版 (U-Boot mod)
+ *
+ * 在官方 256mb v1 定义的基础上，将 ubi 分区由原厂 230MiB 扩大为 240MiB，
+ * 使用原厂布局尾部保留区域的一部分，仍保留 10.25MiB 尾部空间
+ * （与 128M 版 mod-112m 方案的安全边界保持一致）。
+ *
+ * 说明：无第三方 U-Boot 菜单适配，闪存起始地址与官方布局相同（0x5c0000），
+ * 可直接从 256M 标准版系统 sysupgrade 刷入，重启后 ubi 自动扩展到 240MiB。
+ */
+
+#include "mt7981b-cudy-tr3000-256mb-v1.dts"
+
+/ {
+	model = "Cudy TR3000 256MB (U-Boot mod)";
+	compatible = "cudy,tr3000-256mb-mod", "mediatek,mt7981";
+};
+
+/* ubi: 0x5c0000 起、240MiB（原厂 256mb v1 为 230MiB），分区尾部保留 10.25MiB */
+&ubi {
+	reg = <0x5c0000 0xf000000>;
+};

@@ -1,0 +1,198 @@
+# Cudy TR3000 固件自动编译工作流
+#
+# 思路参考 Kwrt(openwrt.ai) 与 Actions-OpenWrt：
+#   官方 OpenWrt 源码 + GitHub Actions 自动构建 + 自动发布 Releases
+#
+# 一次构建同时产出 4 款固件（128M/256M 标准版与大分区版），
+# 大分区(mod)设备定义由 scripts/diy-part1.sh 幂等注入。
+name: Build Cudy TR3000 Firmware
+
+on:
+  # 手动触发（可勾选是否发布 GitHub Release）
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "构建完成后发布到 GitHub Releases"
+        type: boolean
+        default: true
+
+  # 推送代码自动构建（产物见 Actions Artifacts）
+  push:
+    branches: [main, master]
+
+  # 每周日 22:30 (UTC) 定时构建并自动发布
+  schedule:
+    - cron: "30 22 * * 6"
+
+concurrency:
+  group: tr3000-build-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build firmware (OpenWrt 25.12 / mediatek-filogic)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -a -f || true
+          df -h /
+
+      - name: Install host dependencies
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y \
+            build-essential clang flex bison g++ gawk bc \
+            gcc-multilib g++-multilib gettext git libncurses-dev \
+            libssl-dev libelf-dev python3 python3-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget
+
+      - name: Clone OpenWrt source (openwrt-25.12)
+        run: |
+          git clone --depth=1 --branch openwrt-25.12 \
+            https://github.com/openwrt/openwrt.git openwrt
+
+      - name: Apply diy-part1 (feeds source + device definitions + plugins)
+        working-directory: openwrt
+        run: bash ../scripts/diy-part1.sh
+
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply custom files (diy-part2)
+        working-directory: openwrt
+        run: bash ../scripts/diy-part2.sh
+
+      - name: Load build config
+        working-directory: openwrt
+        run: |
+          cp ../configs/tr3000.config .config
+          make defconfig
+          for dev in cudy_tr3000-v1 cudy_tr3000-mod cudy_tr3000-256mb-v1 cudy_tr3000-256mb-mod; do
+            if ! grep -q "CONFIG_TARGET_mediatek_filogic_DEVICE_${dev}=y" .config; then
+              echo "::error::${dev} 未出现在 .config 中，设备定义注入或配置有误"
+              exit 1
+            fi
+            echo "config OK: ${dev}"
+          done
+
+      - name: Verify required packages exist
+        working-directory: openwrt
+        run: |
+          missing=0
+          for pkg in \
+            luci-theme-argon luci-app-passwall2 xray-core luci-app-openclash \
+            luci-app-samba4 luci-app-ksmbd luci-app-vsftpd luci-app-webdav \
+            luci-app-linkease luci-app-ttyd luci-app-store luci-app-hd-idle \
+            luci-app-netdata luci-app-arpbind luci-app-ddns luci-app-ddns-go \
+            luci-app-oaf luci-proto-wireguard wireguard-tools luci-app-softethervpn \
+            luci-app-diskman dnsmasq-full kmod-usb-storage kmod-usb-storage-uas \
+            block-mount kmod-fs-ext4 kmod-fs-vfat kmod-nls-utf8; do
+            if ! grep -q "^Package: ${pkg}$" tmp/.packageinfo; then
+              echo "::error::软件包 ${pkg} 不存在，请检查 feeds 与软件源配置"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          grep -q "CONFIG_PACKAGE_luci-theme-argon=y" .config \
+            || { echo "::error::luci-theme-argon 未进入 .config"; exit 1; }
+          grep -q "CONFIG_PACKAGE_dnsmasq-full=y" .config \
+            || { echo "::error::dnsmasq-full 未进入 .config"; exit 1; }
+          if grep -q "CONFIG_PACKAGE_dnsmasq=y" .config; then
+            echo "::error::dnsmasq 与 dnsmasq-full 冲突（dnsmasq 仍被选中）"
+            exit 1
+          fi
+          echo "校验通过：全部必需软件包均可用"
+
+      - name: Download package sources
+        working-directory: openwrt
+        run: make download -j8 || make download -j1 V=s
+
+      - name: Compile firmware
+        working-directory: openwrt
+        run: make -j"$(nproc)" || make -j1 V=s
+
+      - name: Collect firmware
+        run: |
+          mkdir -p artifacts
+          cp openwrt/bin/targets/mediatek/filogic/*cudy_tr3000*sysupgrade.bin artifacts/
+          cp openwrt/bin/targets/mediatek/filogic/sha256sums artifacts/ 2>/dev/null || true
+          cp openwrt/bin/targets/mediatek/filogic/profiles.json artifacts/ 2>/dev/null || true
+          (cd artifacts && sha256sum -- *.bin > SHA256SUMS.txt)
+          ls -lh artifacts
+          {
+            echo "## 构建产物"
+            echo ""
+            echo "| 文件 | 大小 |"
+            echo "|---|---|"
+            for f in artifacts/*.bin; do
+              printf "| %s | %s |\n" "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cudy-tr3000-firmware-${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish release
+    needs: build
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cudy-tr3000-firmware-${{ github.run_number }}
+          path: artifacts
+
+      - name: Generate release tag
+        id: tag
+        run: echo "tag=tr3000-$(date -u +%Y%m%d)-r${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Cudy TR3000 固件 ${{ steps.tag.outputs.tag }}"
+          body: |
+            基于官方 OpenWrt **openwrt-25.12** 稳定分支自动编译。
+
+            | 固件 | 设备名 | 分区方案 | 内置 |
+            |---|---|---|---|
+            | 128M 标准版 | cudy_tr3000-v1 | 原厂布局（ubi 64M），官方过渡固件后 sysupgrade | 主题 |
+            | 128M 大分区版 | cudy_tr3000-mod | U-Boot mod，ubi 112M（mod-112m 方案） | 主题 + 18 款插件 |
+            | 256M 标准版 | cudy_tr3000-256mb-v1 | 原厂布局（ubi 230M），官方过渡固件后 sysupgrade | 主题 + 18 款插件 |
+            | 256M 大分区版 | cudy_tr3000-256mb-mod | U-Boot mod，ubi 240M | 主题 + 18 款插件 |
+
+            - 默认主题：Argon（4 款固件均内置）
+            - 内置插件（仅大分区版与 256M 标准版）：PassWall2（含 xray-core）、OpenClash、Samba4、
+              ksmbd、vsftpd、WebDAV、LinkEase、ttyd 网页终端、iStore、hd-idle、netdata、arpbind、
+              DDNS / DDNS-Go、oaf 应用过滤、WireGuard、SoftEther VPN、DiskMan
+
+            > 刷机前请阅读仓库 README 的刷机说明并备份原机分区（尤其 FIP），风险自负。
+          files: |
+            artifacts/*.bin
+            artifacts/SHA256SUMS.txt
+            artifacts/profiles.json
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false

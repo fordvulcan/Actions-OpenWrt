@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Cudy TR3000 (128M) 大分区版 (U-Boot mod)
+ *
+ * 在官方 v1 硬件定义的基础上，仅将 ubi 分区由原厂 64MiB 扩大为 112MiB，
+ * 即社区通称的 "mod-112m" 大分区方案（与 Kwrt / LEDE 的 cudy_tr3000-mod 一致）。
+ *
+ * 使用前提：必须已刷入第三方大分区 U-Boot，刷机时选择 mod-112m 分区布局。
+ * 原厂 U-Boot + 原厂分区布局的机器请使用 cudy_tr3000-v1 标准版固件。
+ */
+
+#include "mt7981b-cudy-tr3000-v1.dts"
+
+/ {
+	model = "Cudy TR3000 (U-Boot mod)";
+	compatible = "cudy,tr3000-mod", "mediatek,mt7981";
+};
+
+/* ubi: 0x5c0000 起、112MiB（原厂 v1 为 64MiB），分区尾部保留 10.25MiB */
+&ubi {
+	reg = <0x5c0000 0x7000000>;
+};
