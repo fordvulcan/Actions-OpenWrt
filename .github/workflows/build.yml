@@ -5,7 +5,7 @@
 #
 # 一次构建同时产出 4 款固件（128M/256M 标准版与大分区版），
 # 大分区(mod)设备定义由 scripts/diy-part1.sh 幂等注入。
-# 构建目录位于 runner 数据盘 /mnt/openwrt（系统盘仅放依赖与 workspace）。
+# 构建目录位于工作区 openwrt/（runner 磁盘约 150G，清理预装软件后空间充裕）。
 name: Build Cudy TR3000 Firmware
 
 on:
@@ -43,9 +43,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Show system info and free disk space
-        # ubuntu-24.04 runner 布局：系统盘 ~73G（预装软件占大半）+ 数据盘 ~74G 挂载在 /mnt
-        # （其中约 4G 为 swapfile，保留以稳住编译内存）。本工作流把 OpenWrt 构建目录
-        # 放到 /mnt 数据盘，系统盘仅保留依赖与 workspace，空间充裕。
+        # 先打印系统与磁盘信息（便于排查磁盘/内存问题），再清理系统盘预装软件
+        # 腾出空间。构建目录放在工作区 openwrt/，完整编译建议 60G+ 可用空间。
         run: |
           echo "=== 系统信息 ==="
           uname -a
@@ -67,11 +66,6 @@ jobs:
           echo
           echo "=== 磁盘（清理后） ==="
           df -hT /
-          echo
-          echo "=== 在数据盘准备构建目录 ==="
-          sudo mkdir -p /mnt/openwrt
-          sudo chown -R "$USER":"$USER" /mnt/openwrt
-          df -hT /mnt
 
       - name: Install host dependencies
         run: |
@@ -83,27 +77,40 @@ jobs:
             rsync swig unzip zlib1g-dev file wget
 
       - name: Clone OpenWrt source (openwrt-25.12)
-        # 克隆到数据盘 /mnt（构建目录与 dl/ 下载缓存都在数据盘上）
+        # 克隆到工作区（构建目录与 dl/ 下载缓存都在这里）
         run: |
           git clone --depth=1 --branch openwrt-25.12 \
-            https://github.com/openwrt/openwrt.git /mnt/openwrt
+            https://github.com/openwrt/openwrt.git openwrt
 
       - name: Apply diy-part1 (feeds source + device definitions + plugins)
-        working-directory: /mnt/openwrt
+        working-directory: openwrt
         run: bash "$GITHUB_WORKSPACE/scripts/diy-part1.sh"
 
       - name: Update and install feeds
-        working-directory: /mnt/openwrt
+        working-directory: openwrt
         run: |
           ./scripts/feeds update -a
+          # OpenWrt 25.12 采用 apk 打包，版本号中 -rN 后缀只能出现一次。
+          # 少数第三方包的 PKG_VERSION 自带 -rN（如 2.1.70-r3）且 PKG_RELEASE 非空，
+          # luci.mk 会再拼一次 -rN，生成 2.1.70-r3-r3 这类非法版本号导致 apk 打包失败；
+          # 此处将这类包的 PKG_RELEASE 置空（luci.mk 亦注明 PKG_RELEASE MUST be empty）。
+          fixed=0
+          while IFS= read -r mk; do
+            if grep -qE '^PKG_VERSION:=.*-r[0-9]+$' "$mk" && grep -qE '^PKG_RELEASE:=[0-9]+$' "$mk"; then
+              sed -i 's/^PKG_RELEASE:=[0-9]*$/PKG_RELEASE:=/' "$mk"
+              echo "已修正 apk 版本格式: $mk"
+              fixed=$((fixed + 1))
+            fi
+          done < <(find feeds/kiddin9 -maxdepth 2 -name Makefile 2>/dev/null)
+          echo "共修正 ${fixed} 个 Makefile（PKG_RELEASE 置空）"
           ./scripts/feeds install -a
 
       - name: Apply custom files (diy-part2)
-        working-directory: /mnt/openwrt
+        working-directory: openwrt
         run: bash "$GITHUB_WORKSPACE/scripts/diy-part2.sh"
 
       - name: Load build config
-        working-directory: /mnt/openwrt
+        working-directory: openwrt
         run: |
           cp "$GITHUB_WORKSPACE/configs/tr3000.config" .config
           make defconfig
@@ -124,7 +131,7 @@ jobs:
           done
 
       - name: Verify required packages exist
-        working-directory: /mnt/openwrt
+        working-directory: openwrt
         run: |
           missing=0
           for pkg in \
@@ -149,26 +156,32 @@ jobs:
             echo "::error::dnsmasq 与 dnsmasq-full 冲突（dnsmasq 仍被选中）"
             exit 1
           fi
-          echo "校验通过：全部必需软件包均可用"
+          for mk in luci-lib-linkeasefile luci-app-linkease; do
+            if grep -qE '^PKG_RELEASE:=[0-9]+$' "package/feeds/kiddin9/${mk}/Makefile" 2>/dev/null; then
+              echo "::error::${mk} 的 apk 版本格式修正未生效（PKG_RELEASE 非空）"
+              exit 1
+            fi
+          done
+          echo "校验通过：全部必需软件包均可用，apk 版本修正已生效"
 
       - name: Download package sources
-        working-directory: /mnt/openwrt
+        working-directory: openwrt
         run: make download -j8 || make download -j1 V=s
 
       - name: Compile firmware
-        working-directory: /mnt/openwrt
+        working-directory: openwrt
         run: make -j"$(nproc)" || make -j1 V=s
 
       - name: Collect firmware
         run: |
           mkdir -p artifacts
-          cp /mnt/openwrt/bin/targets/mediatek/filogic/*cudy_tr3000*sysupgrade.bin artifacts/
-          cp /mnt/openwrt/bin/targets/mediatek/filogic/sha256sums artifacts/ 2>/dev/null || true
-          cp /mnt/openwrt/bin/targets/mediatek/filogic/profiles.json artifacts/ 2>/dev/null || true
+          cp openwrt/bin/targets/mediatek/filogic/*cudy_tr3000*sysupgrade.bin artifacts/
+          cp openwrt/bin/targets/mediatek/filogic/sha256sums artifacts/ 2>/dev/null || true
+          cp openwrt/bin/targets/mediatek/filogic/profiles.json artifacts/ 2>/dev/null || true
           (cd artifacts && sha256sum -- *.bin > SHA256SUMS.txt)
           ls -lh artifacts
           echo "=== 构建后磁盘占用 ==="
-          df -hT / /mnt || true
+          df -hT /
           {
             echo "## 构建产物"
             echo ""
