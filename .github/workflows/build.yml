@@ -103,6 +103,18 @@ jobs:
             fi
           done < <(find feeds/kiddin9 -maxdepth 2 -name Makefile 2>/dev/null)
           echo "共修正 ${fixed} 个 Makefile（PKG_RELEASE 置空）"
+          # 候选修复：剥离第三方包的 LUCI_EXTRA_DEPENDS 版本约束。apk 体系下
+          # EXTRA_DEPENDS 走 package-pack.mk 的版本化依赖路径，与官方 25.12
+          # luci.mk 组合时存在包索引丢失风险（luci-app-store 曾因此不在
+          # packages.adb 中）；剥离后仅失去最低版本强制（当前源内版本本就
+          # 满足约束），不影响功能。
+          for pkg in luci-app-store luci-lib-taskd; do
+            mk="feeds/kiddin9/${pkg}/Makefile"
+            if [ -f "$mk" ] && grep -q "^LUCI_EXTRA_DEPENDS:=.*(" "$mk"; then
+              sed -i 's/^LUCI_EXTRA_DEPENDS:=.*/LUCI_EXTRA_DEPENDS:=/' "$mk"
+              echo "已剥离 ${pkg} 的 LUCI_EXTRA_DEPENDS 版本约束"
+            fi
+          done
           ./scripts/feeds install -a
 
       - name: Apply custom files (diy-part2)
@@ -133,6 +145,10 @@ jobs:
       - name: Verify required packages exist
         working-directory: openwrt
         run: |
+          # 双重校验：①包在 feeds 元数据中存在；②包确实进入 .config
+          # （per-device rootfs 下 DEVICE_PACKAGES 包为 =m，全局包为 =y）。
+          # 若②失败说明依赖链断裂被 Kconfig 静默剔除，逐个检查其依赖并
+          # 打印缺失项，便于精确定位断点。
           missing=0
           for pkg in \
             luci-theme-argon luci-app-passwall2 xray-core luci-app-openclash \
@@ -145,13 +161,23 @@ jobs:
             if ! grep -q "^Package: ${pkg}$" tmp/.packageinfo; then
               echo "::error::软件包 ${pkg} 不存在，请检查 feeds 与软件源配置"
               missing=1
+              continue
+            fi
+            if ! grep -qE "^CONFIG_PACKAGE_${pkg}=[ym]$" .config; then
+              echo "::error::${pkg} 未进入 .config（依赖链断裂被 Kconfig 静默剔除），缺失依赖："
+              deps=$(awk -v RS= -v pat="^Package: ${pkg}\\n" '$0 ~ pat' tmp/.packageinfo \
+                | sed -n 's/^Depends: //p')
+              for d in $(echo "$deps" | tr ' ,' '  '); do
+                d=${d%%(*}
+                case "$d" in @*|"") continue ;; esac
+                d=${d#+}
+                grep -q "^Package: ${d}$" tmp/.packageinfo \
+                  || echo "  -> 依赖缺失: ${d}"
+              done
+              missing=1
             fi
           done
           if [ "$missing" -ne 0 ]; then exit 1; fi
-          grep -q "CONFIG_PACKAGE_luci-theme-argon=y" .config \
-            || { echo "::error::luci-theme-argon 未进入 .config"; exit 1; }
-          grep -q "CONFIG_PACKAGE_dnsmasq-full=y" .config \
-            || { echo "::error::dnsmasq-full 未进入 .config"; exit 1; }
           if grep -q "CONFIG_PACKAGE_dnsmasq=y" .config; then
             echo "::error::dnsmasq 与 dnsmasq-full 冲突（dnsmasq 仍被选中）"
             exit 1
@@ -162,7 +188,7 @@ jobs:
               exit 1
             fi
           done
-          echo "校验通过：全部必需软件包均可用，apk 版本修正已生效"
+          echo "校验通过：全部必需软件包均可用且已进入 .config，apk 版本修正已生效"
 
       - name: Download package sources
         working-directory: openwrt
@@ -174,6 +200,14 @@ jobs:
 
       - name: Collect firmware
         run: |
+          # 先确认 kiddin9 关键包的编译产物已生成（区分"未编译"与"包索引缺失"）
+          for f in luci-app-store luci-lib-taskd taskd luci-lib-xterm; do
+            if ! find bin/packages -name "${f}-*" 2>/dev/null | grep -q .; then
+              echo "::error::${f} 的编译产物缺失（bin/packages 下未找到）"
+              find bin/packages -maxdepth 2 -type d 2>/dev/null || true
+              exit 1
+            fi
+          done
           mkdir -p artifacts
           cp openwrt/bin/targets/mediatek/filogic/*cudy_tr3000*sysupgrade.bin artifacts/
           cp openwrt/bin/targets/mediatek/filogic/sha256sums artifacts/ 2>/dev/null || true
