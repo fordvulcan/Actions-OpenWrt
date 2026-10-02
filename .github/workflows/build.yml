@@ -231,7 +231,7 @@ jobs:
               # 上的实际 Depends 形态与本地取证是否一致）。
               echo "--- 诊断 3c：本包完整 stanza + 闭包独有成员 stanza ---"
               grep -A 30 "^Package: ${pkg}\$" tmp/.packageinfo || true
-              for p2 in luci-lib-taskd luci-lib-xterm taskd tar mount-utils procd liblua ubus ubox libudebug libjson-c jshn; do
+              for p2 in luci-lib-taskd luci-lib-xterm taskd tar mount-utils procd liblua ubus ubox libudebug libjson-c jshn curl libuci-lua coreutils coreutils-stty script-utils libblobmsg-json; do
                 echo "[${p2}]"
                 grep -A 4 "^Package: ${p2}\$" tmp/.packageinfo || true
               done
@@ -241,12 +241,35 @@ jobs:
               # （=|空格），并覆盖 store 全部依赖闭包成员——断点在哪层一目了然。
               echo "--- 诊断 4：关键符号在 .config 中的实际值 ---"
               grep -E "CONFIG_(aarch64|x86_64|arm|TARGET_mediatek|TARGET_mediatek_filogic|TARGET_PER_DEVICE_ROOTFS|TARGET_MULTI_PROFILE|MODULES|DEFAULT_luci-app-store|MODULE_DEFAULT_luci-app-store|PACKAGE_luci-app-store|PACKAGE_luci-lua-runtime|PACKAGE_luci-lib-taskd|PACKAGE_luci-lib-xterm|PACKAGE_taskd|PACKAGE_tar|PACKAGE_curl|PACKAGE_libuci-lua|PACKAGE_liblua|PACKAGE_libuci|PACKAGE_mount-utils|PACKAGE_libmount|PACKAGE_libsmartcols|PACKAGE_libblkid|PACKAGE_libuuid|PACKAGE_procd|PACKAGE_ubus|PACKAGE_ubox|PACKAGE_libubox|PACKAGE_libjson-c|PACKAGE_jshn|PACKAGE_script-utils|PACKAGE_coreutils|PACKAGE_coreutils-stty)(=| )" .config || true
+              # 深度诊断 6：自动化根因定位——本包 Kconfig 块每条 depends on 行
+              # 逐行求值（提取符号名查其在 .config 的实际值），直接点出假条件。
+              # tar 在 .config 中零行（非 "is not set"，而是无行）是重大异常：
+              # tar 是 store 的直接依赖（+tar），其依赖会经 mconf_depends 递归
+              # 展开为本包的 depends on 行；同时 dump tar 块与 tar 链符号快照。
+              echo "--- 诊断 6：本包块 depends on 行逐行求值 ---"
+              if [ -f "${kcfg}" ]; then
+                sed -n "/config PACKAGE_${pkg}\$/,/^\$/p" "${kcfg}" | sed -n 's/^[[:space:]]*depends on //p' | while IFS= read -r dc_line; do
+                  printf '  条件[%s] => ' "${dc_line}"
+                  dc_refs=""
+                  for dc_s in $(echo "${dc_line}" | grep -oE '[A-Za-z_][A-Za-z0-9_-]*' | sort -u); do
+                    case "${dc_s}" in y|m|n) continue ;; esac
+                    dc_v=$(grep -m1 -E "^(# )?CONFIG_${dc_s}(=| )" .config | head -1)
+                    dc_refs="${dc_refs}${dc_s}{${dc_v:-未定义}}; "
+                  done
+                  echo "${dc_refs}"
+                done || true
+              fi
+              echo "--- 诊断 6b：tar 的 Kconfig 块 + tar 依赖链符号快照 ---"
+              sed -n "/config PACKAGE_tar\$/,/^\$/p" "${kcfg}" 2>/dev/null | head -40 || true
+              grep -E "CONFIG_(PACKAGE_(tar|bzip2|libbz2|libacl|libattr|libzstd|libstdcpp|xz|liblzma)|PACKAGE_TAR_[A-Z0-9_]+|USE_FS_ACL_ATTR)(=| )" .config || true
               # 深度诊断 5：重跑 defconfig 捕获 kconfig 原生警告——select 目标
               # 的 dir_dep 为 no 时 kconfig 会打印 "unmet direct dependencies"
               # 并直接给出导致剔除的依赖表达式（最终定锤证据）。
               echo "--- 诊断 5：kconfig 警告（重跑 make defconfig）---"
               make defconfig > /tmp/dc-rerun.log 2>&1 || true
-              grep -n -i -B3 -A14 "unmet\|luci-app-store" /tmp/dc-rerun.log | head -120 || true
+              wc -l /tmp/dc-rerun.log || true
+              grep -n -i -B2 -A12 "unmet\|warning\|luci-app-store" /tmp/dc-rerun.log | head -150 || true
+              tail -15 /tmp/dc-rerun.log || true
               missing=1
             fi
           done
