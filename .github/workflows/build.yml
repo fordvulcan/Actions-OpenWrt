@@ -169,7 +169,7 @@ jobs:
             luci-app-netdata luci-app-arpbind luci-app-ddns luci-app-ddns-go \
             luci-app-oaf luci-proto-wireguard wireguard-tools luci-app-softethervpn \
             luci-app-diskman dnsmasq-full kmod-usb-storage kmod-usb-storage-uas \
-            block-mount kmod-fs-ext4 kmod-fs-vfat kmod-nls-utf8; do
+            block-mount kmod-fs-ext4 kmod-fs-vfat kmod-nls-utf8 xz-utils; do
             if ! grep -q "^Package: ${pkg}$" tmp/.packageinfo; then
               echo "::error::软件包 ${pkg} 不存在，请检查 feeds 与软件源配置"
               missing=1
@@ -240,7 +240,7 @@ jobs:
               # 剔除的 "# CONFIG_x is not set" 形态；改用无锚定子串匹配
               # （=|空格），并覆盖 store 全部依赖闭包成员——断点在哪层一目了然。
               echo "--- 诊断 4：关键符号在 .config 中的实际值 ---"
-              grep -E "CONFIG_(aarch64|x86_64|arm|TARGET_mediatek|TARGET_mediatek_filogic|TARGET_PER_DEVICE_ROOTFS|TARGET_MULTI_PROFILE|MODULES|DEFAULT_luci-app-store|MODULE_DEFAULT_luci-app-store|PACKAGE_luci-app-store|PACKAGE_luci-lua-runtime|PACKAGE_luci-lib-taskd|PACKAGE_luci-lib-xterm|PACKAGE_taskd|PACKAGE_tar|PACKAGE_curl|PACKAGE_libuci-lua|PACKAGE_liblua|PACKAGE_libuci|PACKAGE_mount-utils|PACKAGE_libmount|PACKAGE_libsmartcols|PACKAGE_libblkid|PACKAGE_libuuid|PACKAGE_procd|PACKAGE_ubus|PACKAGE_ubox|PACKAGE_libubox|PACKAGE_libjson-c|PACKAGE_jshn|PACKAGE_script-utils|PACKAGE_coreutils|PACKAGE_coreutils-stty)(=| )" .config || true
+              grep -E "CONFIG_(aarch64|x86_64|arm|TARGET_mediatek|TARGET_mediatek_filogic|TARGET_PER_DEVICE_ROOTFS|TARGET_MULTI_PROFILE|MODULES|DEFAULT_luci-app-store|MODULE_DEFAULT_luci-app-store|PACKAGE_luci-app-store|PACKAGE_luci-lua-runtime|PACKAGE_luci-lib-taskd|PACKAGE_luci-lib-xterm|PACKAGE_taskd|PACKAGE_tar|PACKAGE_xz-utils|PACKAGE_curl|PACKAGE_libuci-lua|PACKAGE_liblua|PACKAGE_libuci|PACKAGE_mount-utils|PACKAGE_libmount|PACKAGE_libsmartcols|PACKAGE_libblkid|PACKAGE_libuuid|PACKAGE_procd|PACKAGE_ubus|PACKAGE_ubox|PACKAGE_libubox|PACKAGE_libjson-c|PACKAGE_jshn|PACKAGE_script-utils|PACKAGE_coreutils|PACKAGE_coreutils-stty)(=| )" .config || true
               # 深度诊断 6：自动化根因定位——本包 Kconfig 块每条 depends on 行
               # 逐行求值（提取符号名查其在 .config 的实际值），直接点出假条件。
               # tar 在 .config 中零行（非 "is not set"，而是无行）是重大异常：

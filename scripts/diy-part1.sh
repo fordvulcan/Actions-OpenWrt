@@ -20,7 +20,12 @@ FEEDS_CONF="feeds.conf.default"
 #   - PassWall2 设备级安装不会自动捆绑代理内核，显式加入 xray-core
 #     （需要 sing-box / hysteria 时在本行追加包名即可）
 #   - 末尾 6 个为 USB 存储支持：samba4 / ksmbd / diskman 挂载 U 盘所需
-TR3000_PLUGINS="luci-app-passwall2 xray-core luci-app-openclash luci-app-samba4 luci-app-ksmbd luci-app-vsftpd luci-app-webdav luci-app-linkease luci-app-ttyd luci-app-store luci-app-hd-idle luci-app-netdata luci-app-arpbind luci-app-ddns luci-app-ddns-go luci-app-oaf luci-proto-wireguard wireguard-tools luci-app-softethervpn luci-app-diskman kmod-usb-storage kmod-usb-storage-uas block-mount kmod-fs-ext4 kmod-fs-vfat kmod-nls-utf8"
+#   - xz-utils：per-device rootfs（ALL=n）下无任何包以 + 依赖拉起它，而 GNU
+#     tar 的 Kconfig 块含条件 "!(PACKAGE_TAR_XZ) || PACKAGE_xz-utils"（由 xz
+#     包的裸依赖 xz-utils 展开而来），xz-utils 未选中时该条件为假，导致 tar
+#     与依赖 tar 的 luci-app-store 被 Kconfig 静默剔除（并连锁剔除 mount-utils、
+#     taskd 等）。显式加入后经 MODULE_DEFAULT 机制拉进 .config，链条恢复。
+TR3000_PLUGINS="luci-app-passwall2 xray-core luci-app-openclash luci-app-samba4 luci-app-ksmbd luci-app-vsftpd luci-app-webdav luci-app-linkease luci-app-ttyd luci-app-store luci-app-hd-idle luci-app-netdata luci-app-arpbind luci-app-ddns luci-app-ddns-go luci-app-oaf luci-proto-wireguard wireguard-tools luci-app-softethervpn luci-app-diskman kmod-usb-storage kmod-usb-storage-uas block-mount kmod-fs-ext4 kmod-fs-vfat kmod-nls-utf8 xz-utils"
 
 log() { echo "[diy-part1] $*"; }
 
