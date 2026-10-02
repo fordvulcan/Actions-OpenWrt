@@ -110,7 +110,7 @@ jobs:
           # 满足约束），不影响功能。
           for pkg in luci-app-store luci-lib-taskd; do
             mk="feeds/kiddin9/${pkg}/Makefile"
-            if [ -f "$mk" ] && grep -q "^LUCI_EXTRA_DEPENDS:=.*(\" "$mk"; then
+            if [ -f "$mk" ] && grep -q '^LUCI_EXTRA_DEPENDS:=.*(' "$mk"; then
               sed -i 's/^LUCI_EXTRA_DEPENDS:=.*/LUCI_EXTRA_DEPENDS:=/' "$mk"
               echo "已剥离 ${pkg} 的 LUCI_EXTRA_DEPENDS 版本约束"
             fi
