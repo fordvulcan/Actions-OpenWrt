@@ -110,11 +110,23 @@ jobs:
           # 满足约束），不影响功能。
           for pkg in luci-app-store luci-lib-taskd; do
             mk="feeds/kiddin9/${pkg}/Makefile"
-            if [ -f "$mk" ] && grep -q "^LUCI_EXTRA_DEPENDS:=.*(" "$mk"; then
+            if [ -f "$mk" ] && grep -q "^LUCI_EXTRA_DEPENDS:=.*(\" "$mk"; then
               sed -i 's/^LUCI_EXTRA_DEPENDS:=.*/LUCI_EXTRA_DEPENDS:=/' "$mk"
               echo "已剥离 ${pkg} 的 LUCI_EXTRA_DEPENDS 版本约束"
             fi
           done
+          # 候选修复：剥离 kiddin9 为 luci-app-store 追加的 @(x86_64||aarch64) 架构条件。
+          # 上游 linkease 原版 LUCI_DEPENDS 无此条件（op-packages 仓库自带的
+          # .github/diy/patches/luci-app-store.patch 显示 @ 条件系 kiddin9 后加）。
+          # 该条件会生成 Kconfig "depends on (x86_64||aarch64)"；26 个校验包中
+          # luci-app-store 是唯一带此条件、也是唯一被 Kconfig 剔除的包（passwall2、
+          # openclash、oaf 等同为 luasrc+luci.mk 的包均通过），故先消除此独有变量。
+          # aarch64 目标下两者行为等价；若剥离后仍被剔除，Verify 的深度诊断会打印真凶。
+          mk="feeds/kiddin9/luci-app-store/Makefile"
+          if [ -f "$mk" ] && grep -q '^LUCI_DEPENDS:=@(x86_64||aarch64) ' "$mk"; then
+            sed -i 's/^LUCI_DEPENDS:=@(x86_64||aarch64) /LUCI_DEPENDS:=/' "$mk"
+            echo "已剥离 luci-app-store 的 @(x86_64||aarch64) 架构条件（对齐上游原版）"
+          fi
           ./scripts/feeds install -a
 
       - name: Apply custom files (diy-part2)
@@ -164,16 +176,49 @@ jobs:
               continue
             fi
             if ! grep -qE "^CONFIG_PACKAGE_${pkg}=[ym]$" .config; then
-              echo "::error::${pkg} 未进入 .config（依赖链断裂被 Kconfig 静默剔除），缺失依赖："
-              deps=$(awk -v RS= -v pat="^Package: ${pkg}\\n" '$0 ~ pat' tmp/.packageinfo \
-                | sed -n 's/^Depends: //p')
-              for d in $(echo "$deps" | tr ' ,' '  '); do
-                d=${d%%(*}
-                case "$d" in @*|"") continue ;; esac
-                d=${d#+}
-                grep -q "^Package: ${d}$" tmp/.packageinfo \
-                  || echo "  -> 依赖缺失: ${d}"
+              echo "::error::${pkg} 未进入 .config（依赖链断裂被 Kconfig 静默剔除）"
+              # 深度诊断 1：.packageinfo 中该包的原始元数据（Depends 实际形态，
+              # 含 luci.mk 对 luasrc/ 包自动追加的 +luci-lua-runtime 等）。
+              # 旧版用 awk -v RS= + "\n" 正则提取，mawk 下会静默失效，改用 grep -A。
+              echo "--- 诊断 1：${pkg} 的 .packageinfo 元数据 ---"
+              grep -A 12 "^Package: ${pkg}$" tmp/.packageinfo || true
+              # 深度诊断 2：传递依赖闭包 BFS——从 .packageinfo 逐层展开依赖，
+              # 打印所有不存在的包（含依赖它的上游包名），彻底定位断点。
+              echo "--- 诊断 2：传递依赖闭包 BFS（缺失项 = 依赖链断点）---"
+              declare -A p_seen=( ["${pkg}"]=1 )
+              p_queue=( "${pkg}" )
+              while [ "${#p_queue[@]}" -gt 0 ]; do
+                p_cur="${p_queue[0]}"
+                p_queue=( "${p_queue[@]:1}" )
+                p_deps=$(grep -A 12 "^Package: ${p_cur}$" tmp/.packageinfo | sed -n 's/^Depends: //p')
+                for d in $(echo "${p_deps}" | tr ' ,' '  '); do
+                  d=${d%%(*}
+                  case "$d" in @*|"") continue ;; esac
+                  d=${d#+}
+                  case "$d" in *:*) d="${d##*:}" ;; esac
+                  [ -n "${d}" ] || continue
+                  [ -z "${p_seen[${d}]:-}" ] || continue
+                  p_seen["${d}"]=1
+                  if grep -q "^Package: ${d}$" tmp/.packageinfo; then
+                    p_queue=( "${p_queue[@]}" "${d}" )
+                  else
+                    echo "  -> 依赖缺失: ${d}（被 ${p_cur} 依赖）"
+                  fi
+                done
               done
+              # 深度诊断 3：Kconfig 实际生成的 config 块（depends on / select 全集），
+              # 用于核对 mconf_depends 展开后的真实依赖形态。
+              echo "--- 诊断 3：Kconfig 实际生成的 config 块 ---"
+              kcfg=$(grep -rl "^config PACKAGE_${pkg}$" tmp/ 2>/dev/null | head -1)
+              if [ -n "${kcfg}" ]; then
+                echo "（文件: ${kcfg}）"
+                sed -n "/^config PACKAGE_${pkg}$/,/^$/p" "${kcfg}" | head -60
+              else
+                echo "  (tmp/ 下未找到包含该包的 Kconfig 生成文件)"
+              fi
+              # 深度诊断 4：关键符号在 .config 中的实际值（架构符号与拉力链）。
+              echo "--- 诊断 4：关键符号在 .config 中的实际值 ---"
+              grep -E '^CONFIG_(aarch64|x86_64|arm|TARGET_mediatek|TARGET_mediatek_filogic|TARGET_PER_DEVICE_ROOTFS|TARGET_MULTI_PROFILE|DEFAULT_luci-app-store|MODULE_DEFAULT_luci-app-store|PACKAGE_luci-app-store|PACKAGE_luci-lua-runtime|PACKAGE_luci-lib-taskd|PACKAGE_taskd|PACKAGE_tar|MODULES)=' .config || true
               missing=1
             fi
           done
@@ -188,6 +233,10 @@ jobs:
               exit 1
             fi
           done
+          if grep -q '^LUCI_DEPENDS:=@(x86_64||aarch64)' "package/feeds/kiddin9/luci-app-store/Makefile" 2>/dev/null; then
+            echo "::error::luci-app-store 的 @(x86_64||aarch64) 架构条件剥离未生效"
+            exit 1
+          fi
           echo "校验通过：全部必需软件包均可用且已进入 .config，apk 版本修正已生效"
 
       - name: Download package sources
