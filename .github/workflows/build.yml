@@ -206,19 +206,47 @@ jobs:
                   fi
                 done
               done
-              # 深度诊断 3：Kconfig 实际生成的 config 块（depends on / select 全集），
-              # 用于核对 mconf_depends 展开后的真实依赖形态。
+              # 深度诊断 3：Kconfig 实际生成的 config 块（depends on / select 全集）。
+              # 注意：生成的 config 行带 tab 前缀，旧版 ^config 锚定永远漏检
+              # （假阴性），改用无锚定子串匹配；文件为 tmp/.config-package.in。
               echo "--- 诊断 3：Kconfig 实际生成的 config 块 ---"
-              kcfg=$(grep -rl "^config PACKAGE_${pkg}$" tmp/ 2>/dev/null | head -1)
-              if [ -n "${kcfg}" ]; then
-                echo "（文件: ${kcfg}）"
-                sed -n "/^config PACKAGE_${pkg}$/,/^$/p" "${kcfg}" | head -60
+              kcfg="tmp/.config-package.in"
+              if [ -f "${kcfg}" ] && grep -q "config PACKAGE_${pkg}\$" "${kcfg}"; then
+                sed -n "/config PACKAGE_${pkg}\$/,/^\$/p" "${kcfg}" | head -80
               else
-                echo "  (tmp/ 下未找到包含该包的 Kconfig 生成文件)"
+                echo "  (${kcfg} 中不存在 config PACKAGE_${pkg} 块)"
+                grep -rl "config PACKAGE_${pkg}\$" tmp/ 2>/dev/null || true
               fi
-              # 深度诊断 4：关键符号在 .config 中的实际值（架构符号与拉力链）。
+              # 深度诊断 3b：本包 vs 对照包 passwall2（共用闭包核心且存活）的
+              # depends on 行对比。select 目标的 dir_dep 为 no 时会被 kconfig
+              # 强制剔除，这里直接暴露被传递继承的假依赖表达式。
+              echo "--- 诊断 3b：本包 vs passwall2 的 depends on 行 ---"
+              for p2 in "${pkg}" luci-app-passwall2; do
+                echo "[${p2}]"
+                if [ -f "${kcfg}" ]; then
+                  sed -n "/config PACKAGE_${p2}\$/,/^\$/p" "${kcfg}" | grep "depends on" || echo "  (无 depends on 行)"
+                fi
+              done
+              # 深度诊断 3c：本包完整 stanza + 闭包独有成员 stanza（核对 CI
+              # 上的实际 Depends 形态与本地取证是否一致）。
+              echo "--- 诊断 3c：本包完整 stanza + 闭包独有成员 stanza ---"
+              grep -A 30 "^Package: ${pkg}\$" tmp/.packageinfo || true
+              for p2 in luci-lib-taskd luci-lib-xterm taskd tar mount-utils procd liblua ubus ubox libudebug libjson-c jshn; do
+                echo "[${p2}]"
+                grep -A 4 "^Package: ${p2}\$" tmp/.packageinfo || true
+              done
+              # 深度诊断 4：关键符号在 .config 中的实际值（架构符号、拉力链与
+              # 完整传递闭包）。旧版以 ^...= 锚定只看 =y/=m，会漏掉被连带
+              # 剔除的 "# CONFIG_x is not set" 形态；改用无锚定子串匹配
+              # （=|空格），并覆盖 store 全部依赖闭包成员——断点在哪层一目了然。
               echo "--- 诊断 4：关键符号在 .config 中的实际值 ---"
-              grep -E '^CONFIG_(aarch64|x86_64|arm|TARGET_mediatek|TARGET_mediatek_filogic|TARGET_PER_DEVICE_ROOTFS|TARGET_MULTI_PROFILE|DEFAULT_luci-app-store|MODULE_DEFAULT_luci-app-store|PACKAGE_luci-app-store|PACKAGE_luci-lua-runtime|PACKAGE_luci-lib-taskd|PACKAGE_taskd|PACKAGE_tar|MODULES)=' .config || true
+              grep -E "CONFIG_(aarch64|x86_64|arm|TARGET_mediatek|TARGET_mediatek_filogic|TARGET_PER_DEVICE_ROOTFS|TARGET_MULTI_PROFILE|MODULES|DEFAULT_luci-app-store|MODULE_DEFAULT_luci-app-store|PACKAGE_luci-app-store|PACKAGE_luci-lua-runtime|PACKAGE_luci-lib-taskd|PACKAGE_luci-lib-xterm|PACKAGE_taskd|PACKAGE_tar|PACKAGE_curl|PACKAGE_libuci-lua|PACKAGE_liblua|PACKAGE_libuci|PACKAGE_mount-utils|PACKAGE_libmount|PACKAGE_libsmartcols|PACKAGE_libblkid|PACKAGE_libuuid|PACKAGE_procd|PACKAGE_ubus|PACKAGE_ubox|PACKAGE_libubox|PACKAGE_libjson-c|PACKAGE_jshn|PACKAGE_script-utils|PACKAGE_coreutils|PACKAGE_coreutils-stty)(=| )" .config || true
+              # 深度诊断 5：重跑 defconfig 捕获 kconfig 原生警告——select 目标
+              # 的 dir_dep 为 no 时 kconfig 会打印 "unmet direct dependencies"
+              # 并直接给出导致剔除的依赖表达式（最终定锤证据）。
+              echo "--- 诊断 5：kconfig 警告（重跑 make defconfig）---"
+              make defconfig > /tmp/dc-rerun.log 2>&1 || true
+              grep -n -i -B3 -A14 "unmet\|luci-app-store" /tmp/dc-rerun.log | head -120 || true
               missing=1
             fi
           done
