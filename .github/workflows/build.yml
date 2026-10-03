@@ -300,11 +300,19 @@ jobs:
 
       - name: Collect firmware
         run: |
-          # 先确认 kiddin9 关键包的编译产物已生成（区分"未编译"与"包索引缺失"）
+          # 先确认 kiddin9 关键包的编译产物已生成（区分"未编译"与"包索引缺失"）。
+          # 注意：本步骤无 working-directory（在仓库根目录运行），包产物位于
+          # openwrt/bin/packages，路径必须带 openwrt/ 前缀，否则 find 永远空
+          # 结果、误报"编译产物缺失"（曾因此误杀成功构建）。
+          pkgbase="openwrt/bin/packages"
+          if [ ! -d "${pkgbase}" ]; then
+            echo "::error::${pkgbase} 目录不存在，编译产物整体未生成（检查 Compile 步骤）"
+            exit 1
+          fi
           for f in luci-app-store luci-lib-taskd taskd luci-lib-xterm; do
-            if ! find bin/packages -name "${f}-*" 2>/dev/null | grep -q .; then
-              echo "::error::${f} 的编译产物缺失（bin/packages 下未找到）"
-              find bin/packages -maxdepth 2 -type d 2>/dev/null || true
+            if ! find "${pkgbase}" -name "${f}-*" 2>/dev/null | grep -q .; then
+              echo "::error::${f} 的编译产物缺失（${pkgbase} 下未找到）"
+              find "${pkgbase}" -maxdepth 3 -type d 2>/dev/null || true
               exit 1
             fi
           done
