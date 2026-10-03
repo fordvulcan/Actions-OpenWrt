@@ -1,0 +1,101 @@
+#
+# 从已有构建产物发布 GitHub Release（免重新编译，约 1 分钟完成）。
+#
+# 用法：Actions → "Publish release from existing build" → Run workflow
+#   - run_number 留空：自动选取 build.yml 最近一次成功的运行；
+#   - 也可填入任意历史成功运行的编号（Actions 列表中显示的 #N）。
+#
+# 产物来源：目标运行上传的 Artifacts（cudy-tr3000-firmware-<N>，
+# 保留 30 天）；该运行需已走到 Upload firmware artifacts 步骤。
+# 发布标签格式与定时构建一致：tr3000-YYYYMMDD-r<N>。
+#
+name: Publish release from existing build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_number:
+        description: "构建 Run 编号（留空 = 最近一次成功构建）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve build run and download artifacts
+        id: fetch
+        env:
+          IN_RUN: ${{ inputs.run_number }}
+        run: |
+          # 目标运行编号：留空时自动取 build.yml 最近一次成功运行
+          repo="${GH_REPO}"
+          rn="${IN_RUN}"
+          rn="${rn#\#}"     # 容忍 "#11" 形式
+          rn="${rn// /}"    # 去掉所有空格
+          if [ -z "${rn}" ]; then
+            rn=$(gh run list --repo "${repo}" --workflow=build.yml --status=success --limit=1 --json number --jq '.[0].number')
+          fi
+          if [ -z "${rn}" ] || [ "${rn}" = "null" ]; then
+            echo "::error::没有可用的成功构建：build.yml 尚无成功完成的运行"
+            exit 1
+          fi
+          case "${rn}" in
+            ''|*[!0-9]*)
+              echo "::error::run_number 无效：${IN_RUN}（应为数字编号，如 11）"
+              exit 1
+              ;;
+          esac
+          run_id=$(gh run list --repo "${repo}" --workflow=build.yml --limit=200 --json number,databaseId --jq ".[] | select(.number == ${rn}) | .databaseId" | head -1)
+          if [ -z "${run_id}" ]; then
+            echo "::error::未找到编号为 #${rn} 的 build.yml 运行，请核对 Actions 页面显示的编号"
+            exit 1
+          fi
+          echo "目标构建运行: #${rn} (id=${run_id})"
+          if ! gh run download "${run_id}" --repo "${repo}" --name "cudy-tr3000-firmware-${rn}" --dir artifacts; then
+            echo "::error::产物下载失败：该运行可能未成功上传产物，或 Artifact 已超过 30 天保留期"
+            exit 1
+          fi
+          ls -lh artifacts
+          echo "rn=${rn}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release tag
+        id: tag
+        run: echo "tag=tr3000-$(date -u +%Y%m%d)-r${{ steps.fetch.outputs.rn }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Cudy TR3000 固件 ${{ steps.tag.outputs.tag }}"
+          body: |
+            基于官方 OpenWrt **openwrt-25.12** 稳定分支自动编译（对应构建运行 #${{ steps.fetch.outputs.rn }}）。
+
+            | 固件 | 设备名 | 分区方案 | 内置 |
+            |---|---|---|---|
+            | 128M 标准版 | cudy_tr3000-v1 | 原厂布局（ubi 64M），官方过渡固件后 sysupgrade | 主题 |
+            | 128M 大分区版 | cudy_tr3000-mod | U-Boot mod，ubi 112M（mod-112m 方案） | 主题 + 18 款插件 |
+            | 256M 标准版 | cudy_tr3000-256mb-v1 | 原厂布局（ubi 230M），官方过渡固件后 sysupgrade | 主题 + 18 款插件 |
+            | 256M 大分区版 | cudy_tr3000-256mb-mod | U-Boot mod，ubi 240M | 主题 + 18 款插件 |
+
+            - 默认主题：Argon（4 款固件均内置）
+            - 内置插件（仅大分区版与 256M 标准版）：PassWall2（含 xray-core）、OpenClash、Samba4、
+              ksmbd、vsftpd、WebDAV、LinkEase、ttyd 网页终端、iStore、hd-idle、netdata、arpbind、
+              DDNS / DDNS-Go、oaf 应用过滤、WireGuard、SoftEther VPN、DiskMan
+
+            > 刷机前请阅读仓库 README 的刷机说明并备份原机分区（尤其 FIP），风险自负。
+          files: |
+            artifacts/*.bin
+            artifacts/SHA256SUMS.txt
+            artifacts/profiles.json
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false
